@@ -8778,6 +8778,66 @@ fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() 
     );
 }
 
+#[test]
+fn read_input_state_introspects_the_sigscript_length_once_per_call_site() {
+    // Every field read measures from the same base, and none of them can constant-fold it because
+    // the length is an introspection. Deriving it once and sharing it is the whole of that; a
+    // count above one means some part of the call site is still building its own.
+    //
+    // Unlike the invariance above this pins an absolute, which is only meaningful because the
+    // contract is minimal: nothing else in it introspects a sigscript length, so the count is
+    // entirely the decoder's.
+    let source = r#"
+        contract C(int initA) {
+            int a = initA;
+
+            entry noop() {
+                require(true);
+            }
+
+            entry main() {
+                State {a: int readA} = readInputState(this.activeInputIndex);
+                require(readA == 5);
+            }
+        }
+    "#;
+
+    let compiled = compile_contract(source, &[5.into()], CompileOptions::default()).expect("compile succeeds");
+    let derivations = opcode_occurrences(&bytecode(&compiled), OpTxInputScriptSigLen);
+
+    assert_eq!(derivations, 1, "a plain state read should introspect the sigscript length once, got {derivations}");
+}
+
+#[test]
+fn read_input_state_with_template_introspects_the_sigscript_length_once_per_call_site() {
+    // The templated decoder derives the same base, but from the claimed prefix and suffix lengths
+    // rather than a constant, so each redundant derivation costs a good deal more than the plain
+    // decoder's. It is measured from in three places by the validation (the redeem script, the
+    // prefix and the suffix) and once per field by the reads.
+    let source = r#"
+        contract Reader() {
+            struct RemoteState {
+                int x;
+            }
+
+            entry main(int prefixLen, int suffixLen) {
+                RemoteState {x: int readX} = readInputStateWithTemplate(
+                    1,
+                    prefixLen,
+                    suffixLen,
+                    byte[32](0x0000000000000000000000000000000000000000000000000000000000000000)
+                );
+                require(readX == 5);
+            }
+        }
+    "#;
+
+    let compiled = compile_contract(source, &[], CompileOptions::default()).expect("compile succeeds");
+    let derivations = opcode_occurrences(&bytecode(&compiled), OpTxInputScriptSigLen);
+
+    assert_eq!(derivations, 1, "a templated state read should introspect the sigscript length once, got {derivations}");
+}
+
 fn wide_mixed_width_state_source() -> String {
     let c = (0..100u8).map(|byte| format!("{:02x}", byte ^ 0xa5)).collect::<String>();
     let d = (0..32u8).map(|byte| format!("{:02x}", byte.wrapping_add(0x40))).collect::<String>();
