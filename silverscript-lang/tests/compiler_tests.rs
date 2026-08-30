@@ -8744,12 +8744,14 @@ fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() 
 }
 
 #[test]
-fn read_input_state_introspects_the_sigscript_length_once_per_call_site() {
+fn read_input_state_introspects_the_sigscript_length_twice_per_call_site() {
     // The window binding, the framing guard and every field read all measure from the same base,
     // and none of them can constant-fold it because the length is an introspection. Deriving it
-    // once and sharing it is the whole of that; a count above one means some part of the call
-    // site is still building its own.
+    // once and sharing it is one of the two; the other is the window's end, which is the
+    // sigscript length itself, taken directly rather than rebuilt as base plus size.
     //
+    // Two is therefore the floor, not a cost that was traded away: the second introspection is
+    // what removes the size derivation, and it is smaller than the size derivation it replaces.
     // Unlike the invariance above this pins an absolute, which is only meaningful because the
     // contract is minimal: nothing else in it introspects a sigscript length, so the count is
     // entirely the decoder's.
@@ -8771,15 +8773,14 @@ fn read_input_state_introspects_the_sigscript_length_once_per_call_site() {
     let compiled = compile_contract(source, &[5.into()], CompileOptions::default()).expect("compile succeeds");
     let derivations = opcode_occurrences(&bytecode(&compiled), OpTxInputScriptSigLen);
 
-    assert_eq!(derivations, 1, "a plain state read should introspect the sigscript length once, got {derivations}");
+    assert_eq!(derivations, 2, "a plain state read should introspect the sigscript length twice, got {derivations}");
 }
 
 #[test]
-fn read_input_state_with_template_introspects_the_sigscript_length_once_per_call_site() {
-    // The templated decoder derives the same base, but from the claimed prefix and suffix lengths
-    // rather than a constant, so each redundant derivation costs a good deal more than the plain
-    // decoder's. It is validated in four places (the redeem script, the prefix, the suffix and
-    // the framing guard) and read once per field.
+fn read_input_state_with_template_introspects_the_sigscript_length_twice_per_call_site() {
+    // As above: once for the shared base, once for the window's end. The templated decoder builds
+    // its base from the claimed prefix and suffix lengths rather than a constant, so both the
+    // sharing and taking the end directly save more here than in the plain decoder.
     let source = r#"
         contract Reader() {
             struct RemoteState {
@@ -8801,7 +8802,7 @@ fn read_input_state_with_template_introspects_the_sigscript_length_once_per_call
     let compiled = compile_contract(source, &[], CompileOptions::default()).expect("compile succeeds");
     let derivations = opcode_occurrences(&bytecode(&compiled), OpTxInputScriptSigLen);
 
-    assert_eq!(derivations, 1, "a templated state read should introspect the sigscript length once, got {derivations}");
+    assert_eq!(derivations, 2, "a templated state read should introspect the sigscript length twice, got {derivations}");
 }
 
 fn wide_mixed_width_state_source() -> String {

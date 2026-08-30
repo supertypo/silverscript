@@ -612,7 +612,6 @@ fn compile_read_input_state_statement<'i>(
             // meaningful once the window itself cannot move.
             compile_input_script_binding(
                 &input_idx,
-                &Expr::int(bytecode_size_value),
                 &base_expr,
                 ctx.stack_bindings,
                 ctx.types,
@@ -714,7 +713,6 @@ fn compile_read_input_state_statement<'i>(
                 ctx.types,
                 ctx.builder,
                 &layout_field_types,
-                &bytecode_size_expr,
                 &base_expr,
                 ctx.bytecode_size,
                 ctx.contract_constants,

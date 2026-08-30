@@ -9,8 +9,17 @@ fn byte_array_type(dimension: ArrayDim) -> TypeRef {
     TypeRef { base: TypeBase::Byte, array_dims: vec![dimension] }
 }
 
+/// The start of the window a state read measures from: the foreign input's sigscript length minus
+/// the size of the script being read, so the window is that script's last `bytecode_size` bytes.
+///
+/// Callers rely on the other end of that window being the sigscript length itself, which follows
+/// from this definition. Changing what the base means breaks that, silently.
 pub(super) fn input_sigscript_base_expr<'i>(input_idx: &Expr<'i>, bytecode_size_expr: Expr<'i>) -> Expr<'i> {
-    binary_expr(BinaryOp::Sub, Expr::call("OpTxInputScriptSigLen", vec![input_idx.clone()]), bytecode_size_expr)
+    binary_expr(BinaryOp::Sub, input_sigscript_len_expr(input_idx), bytecode_size_expr)
+}
+
+fn input_sigscript_len_expr<'i>(input_idx: &Expr<'i>) -> Expr<'i> {
+    Expr::call("OpTxInputScriptSigLen", vec![input_idx.clone()])
 }
 
 fn input_sigscript_substr_expr<'i>(input_idx: &Expr<'i>, start: Expr<'i>, end: Expr<'i>) -> Expr<'i> {
@@ -185,7 +194,6 @@ fn emit_state_framing_guard(
 /// decoder needed it.
 pub(super) fn compile_input_script_binding(
     input_idx: &Expr<'_>,
-    bytecode_size_expr: &Expr<'_>,
     sigscript_base_expr: &Expr<'_>,
     stack_bindings: &StackBindings,
     types: &TypeMap,
@@ -194,7 +202,9 @@ pub(super) fn compile_input_script_binding(
     contract_constants: &HashMap<String, Expr<'_>>,
 ) -> Result<(), CompilerError> {
     let base = sigscript_base_expr.clone();
-    let end = binary_expr(BinaryOp::Add, base.clone(), bytecode_size_expr.clone());
+    // The window ends where the sigscript does. `base` is the length minus the size, so
+    // `base + size` is that length again; taking it directly drops a whole size derivation.
+    let end = input_sigscript_len_expr(input_idx);
     let redeem = input_sigscript_substr_expr(input_idx, base, end);
     let expected_spk = Expr::new(
         ExprKind::New { name: "ScriptPubKeyP2SHFromRedeemScript".to_string(), args: vec![redeem], name_span: span::Span::default() },
@@ -312,7 +322,6 @@ pub(super) fn compile_read_input_state_with_template_validation(
     types: &TypeMap,
     builder: &mut ScriptBuilder,
     layout_field_types: &[TypeRef],
-    bytecode_size_expr: &Expr<'_>,
     sigscript_base_expr: &Expr<'_>,
     current_bytecode_size: Option<i64>,
     contract_constants: &HashMap<String, Expr<'_>>,
@@ -330,7 +339,9 @@ pub(super) fn compile_read_input_state_with_template_validation(
 
     let bytecode_base_expr = sigscript_base_expr.clone();
     let prefix_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), template_prefix_len.clone());
-    let bytecode_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), bytecode_size_expr.clone());
+    // As in compile_input_script_binding: base is the sigscript length minus the size, so the
+    // redeem script ends at that length.
+    let bytecode_end_expr = input_sigscript_len_expr(input_idx);
     let state_len = encoded_state_len_for_layout_field_types(layout_field_types, contract_constants)?;
     let suffix_start_expr = binary_expr(BinaryOp::Add, prefix_end_expr.clone(), Expr::int(state_len as i64));
     let suffix_end_expr = binary_expr(BinaryOp::Add, suffix_start_expr.clone(), template_suffix_len.clone());
