@@ -660,16 +660,6 @@ fn compile_read_input_state_statement<'i>(
                 &TypeRef { base: TypeBase::Custom(target_struct.to_string()), array_dims: Vec::new() },
                 structs,
             )?;
-            compile_read_input_state_with_template_validation(
-                args,
-                ctx.stack_bindings,
-                ctx.types,
-                ctx.builder,
-                &layout_field_types,
-                ctx.bytecode_size,
-                ctx.contract_constants,
-            )?;
-
             let input_idx = input_idx.clone();
             let state_start_offset_expr = template_prefix_len.clone();
             let bytecode_size_expr = templated_input_bytecode_size_expr(
@@ -678,8 +668,25 @@ fn compile_read_input_state_statement<'i>(
                 &layout_field_types,
                 ctx.contract_constants,
             )?;
+            // Derive the base before the validation that measures from it, rather than after the
+            // validation has built its own. Here that is worth more than in the plain arm: the
+            // size is built from the claimed prefix and suffix lengths, so each derivation dropped
+            // is two stack picks and two additions rather than one constant push.
             let base_name = bind_input_sigscript_base(ctx, &input_idx, bytecode_size_expr.clone())?;
             added_stack_locals.push(base_name.clone());
+            let base_expr = Expr::identifier(&base_name);
+
+            compile_read_input_state_with_template_validation(
+                args,
+                ctx.stack_bindings,
+                ctx.types,
+                ctx.builder,
+                &layout_field_types,
+                &bytecode_size_expr,
+                &base_expr,
+                ctx.bytecode_size,
+                ctx.contract_constants,
+            )?;
 
             let mut field_chunk_offset = 0usize;
 

@@ -155,8 +155,7 @@ pub(super) fn cast_read_input_state_expr<'i>(substr: Expr<'i>, type_ref: &TypeRe
 ///   args = (input_idx, template_prefix_len, template_suffix_len, expected_template_hash)
 ///   require target state layout is a non-empty flattened struct
 ///
-///   bytecode_size = template_prefix_len + encoded_state_len(layout_field_types) + template_suffix_len
-///   bytecode_base = input_sigscript_len(input_idx) - bytecode_size
+///   bytecode_size, bytecode_base = the caller's, derived once for the whole read
 ///
 ///   actual_redeem_script = input_sigscript[bytecode_base .. bytecode_base + bytecode_size]
 ///   prefix = input_sigscript[bytecode_base .. bytecode_base + template_prefix_len]
@@ -181,6 +180,8 @@ pub(super) fn compile_read_input_state_with_template_validation(
     types: &TypeMap,
     builder: &mut ScriptBuilder,
     layout_field_types: &[TypeRef],
+    bytecode_size_expr: &Expr<'_>,
+    sigscript_base_expr: &Expr<'_>,
     current_bytecode_size: Option<i64>,
     contract_constants: &HashMap<String, Expr<'_>>,
 ) -> Result<(), CompilerError> {
@@ -195,9 +196,7 @@ pub(super) fn compile_read_input_state_with_template_validation(
         return Err(CompilerError::Unsupported("readInputStateWithTemplate requires a struct type".to_string()));
     }
 
-    let bytecode_size_expr =
-        templated_input_bytecode_size_expr(template_prefix_len, template_suffix_len, layout_field_types, contract_constants)?;
-    let bytecode_base_expr = input_sigscript_base_expr(input_idx, bytecode_size_expr.clone());
+    let bytecode_base_expr = sigscript_base_expr.clone();
     let prefix_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), template_prefix_len.clone());
     let bytecode_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), bytecode_size_expr.clone());
     let state_len = encoded_state_len_for_layout_field_types(layout_field_types, contract_constants)?;
