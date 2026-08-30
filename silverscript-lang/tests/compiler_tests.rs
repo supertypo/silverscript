@@ -203,9 +203,9 @@ fn sigscript_push_bytecode(bytecode: &[u8]) -> Vec<u8> {
     script_builder().add_data_with_push_opcode(bytecode).unwrap().drain()
 }
 
-/// How many times `bytecode` executes `opcode`. Parsed rather than scanned for the byte, so a
-/// data push that happens to contain the value is not miscounted.
 fn opcode_occurrences(bytecode: &[u8], opcode_value: u8) -> usize {
+    // Parsed rather than scanned for the byte, so a data push that happens to contain the value
+    // is not miscounted.
     parse_script::<PopulatedTransaction<'static>, SigHashReusedValuesUnsync>(bytecode)
         .map(|opcode| opcode.expect("compiled bytecode should parse"))
         .filter(|opcode| opcode.value() == opcode_value)
@@ -8723,17 +8723,14 @@ fn read_input_state_accepts_three_field_state_under_dispatch_tag_dispatch() {
     assert!(result.is_ok(), "readInputState should read mixed-width state under dispatch_tag dispatch: {result:?}");
 }
 
-/// A `readInputState` derives the foreign input's sigscript base ONCE, however many fields it
-/// binds.
-///
-/// The base is `input_sigscript_len(idx) - this.bytecodeSize`. It is the same value for every
-/// field, it cannot be constant-folded because the length is an introspection, and each field
-/// read references it twice — once for the substring's start and once for its end. Built inline
-/// it is therefore emitted twice per field, so the cost of reading a state grows with its width
-/// for no reason. Counting the introspection is the direct statement of the fix: it must not
-/// scale with the number of fields.
 #[test]
 fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() {
+    // The base is the input's sigscript length minus this.bytecodeSize. It is the same value for
+    // every field, it cannot be constant-folded because the length is an introspection, and each
+    // field read references it twice, once for the substring's start and once for its end. Built
+    // inline it is therefore emitted twice per field, so the cost of reading a state grows with
+    // its width for no reason. Counting the introspection states that directly: it must not
+    // scale with the number of fields.
     let contract = |fields: &str, binds: &str| {
         format!(
             r#"
@@ -8752,8 +8749,14 @@ fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() 
 
     let one = contract("byte[32] a = initA;", "require(s.a == initA);");
     let four = contract(
-        "byte[32] a = initA;\n            byte[32] b = initB;\n            byte[32] c = initC;\n            byte[32] d = initD;",
-        "require(s.a == initA);\n                require(s.b == initB);\n                require(s.c == initC);\n                require(s.d == initD);",
+        r#"byte[32] a = initA;
+            byte[32] b = initB;
+            byte[32] c = initC;
+            byte[32] d = initD;"#,
+        r#"require(s.a == initA);
+                require(s.b == initB);
+                require(s.c == initC);
+                require(s.d == initD);"#,
     );
 
     let compiled_one = compile_contract(&one, &[arg(), arg(), arg(), arg()], CompileOptions::default()).expect("one field compiles");
@@ -8763,7 +8766,7 @@ fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() 
     let one_derivations = opcode_occurrences(&bytecode(&compiled_one), OpTxInputScriptSigLen);
     let four_derivations = opcode_occurrences(&bytecode(&compiled_four), OpTxInputScriptSigLen);
 
-    // The claim is that the count is a property of the CALL SITE, not of the state's width, so it
+    // The claim is that the count is a property of the call site, not of the state's width, so it
     // is asserted as an invariance rather than as an absolute. Anything else the compiler may
     // introspect the sigscript length for costs the same for one field as for four, and pinning a
     // literal here would make this test a tripwire for those instead of for this.
