@@ -130,19 +130,16 @@ fn emit_state_framing_guard(
     input_idx: &Expr<'_>,
     state_start_offset_expr: &Expr<'_>,
     layout_field_types: &[TypeRef],
-    bytecode_size_expr: &Expr<'_>,
+    sigscript_base_expr: &Expr<'_>,
     env: &ExprEnv<'_, '_>,
     emitter: &mut ScriptEmitter<'_>,
 ) -> Result<(), CompilerError> {
     let int_type = scalar_type(TypeBase::Int);
     let region_len = encoded_state_len_for_layout_field_types(layout_field_types, env.contract_constants)?;
 
-    // region_start = input_sigscript_len(idx) - bytecode_size + state_start_offset
+    // region_start = sigscript_base + state_start_offset
     compile_expr(input_idx, Some(&int_type), env, emitter)?;
-    emitter.emit_op(OpDup, 1)?;
-    emitter.emit_op(OpTxInputScriptSigLen, 0)?;
-    compile_expr(bytecode_size_expr, Some(&int_type), env, emitter)?;
-    emitter.emit_op(OpSub, -1)?;
+    compile_expr(sigscript_base_expr, Some(&int_type), env, emitter)?;
     compile_expr(state_start_offset_expr, Some(&int_type), env, emitter)?;
     emitter.emit_op(OpAdd, -1)?;
 
@@ -189,13 +186,14 @@ fn emit_state_framing_guard(
 pub(super) fn compile_input_script_binding(
     input_idx: &Expr<'_>,
     bytecode_size_expr: &Expr<'_>,
+    sigscript_base_expr: &Expr<'_>,
     stack_bindings: &StackBindings,
     types: &TypeMap,
     builder: &mut ScriptBuilder,
     bytecode_size: Option<i64>,
     contract_constants: &HashMap<String, Expr<'_>>,
 ) -> Result<(), CompilerError> {
-    let base = input_sigscript_base_expr(input_idx, bytecode_size_expr.clone());
+    let base = sigscript_base_expr.clone();
     let end = binary_expr(BinaryOp::Add, base.clone(), bytecode_size_expr.clone());
     let redeem = input_sigscript_substr_expr(input_idx, base, end);
     let expected_spk = Expr::new(
@@ -220,7 +218,7 @@ pub(super) fn compile_state_framing_guard(
     input_idx: &Expr<'_>,
     state_start_offset_expr: &Expr<'_>,
     layout_field_types: &[TypeRef],
-    bytecode_size_expr: &Expr<'_>,
+    sigscript_base_expr: &Expr<'_>,
     stack_bindings: &StackBindings,
     types: &TypeMap,
     builder: &mut ScriptBuilder,
@@ -229,7 +227,7 @@ pub(super) fn compile_state_framing_guard(
 ) -> Result<(), CompilerError> {
     let env = ExprEnv { constants: contract_constants, stack_bindings, types, bytecode_size, contract_constants };
     let mut emitter = ScriptEmitter::new(builder, 0);
-    emit_state_framing_guard(input_idx, state_start_offset_expr, layout_field_types, bytecode_size_expr, &env, &mut emitter)
+    emit_state_framing_guard(input_idx, state_start_offset_expr, layout_field_types, sigscript_base_expr, &env, &mut emitter)
 }
 
 /// One field's read, at its constant offset from `sigscript_base_expr`.
@@ -314,6 +312,8 @@ pub(super) fn compile_read_input_state_with_template_validation(
     types: &TypeMap,
     builder: &mut ScriptBuilder,
     layout_field_types: &[TypeRef],
+    bytecode_size_expr: &Expr<'_>,
+    sigscript_base_expr: &Expr<'_>,
     current_bytecode_size: Option<i64>,
     contract_constants: &HashMap<String, Expr<'_>>,
 ) -> Result<(), CompilerError> {
@@ -328,9 +328,7 @@ pub(super) fn compile_read_input_state_with_template_validation(
         return Err(CompilerError::Unsupported("readInputStateWithTemplate requires a struct type".to_string()));
     }
 
-    let bytecode_size_expr =
-        templated_input_bytecode_size_expr(template_prefix_len, template_suffix_len, layout_field_types, contract_constants)?;
-    let bytecode_base_expr = input_sigscript_base_expr(input_idx, bytecode_size_expr.clone());
+    let bytecode_base_expr = sigscript_base_expr.clone();
     let prefix_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), template_prefix_len.clone());
     let bytecode_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), bytecode_size_expr.clone());
     let state_len = encoded_state_len_for_layout_field_types(layout_field_types, contract_constants)?;
@@ -374,7 +372,7 @@ pub(super) fn compile_read_input_state_with_template_validation(
     emitter.emit_op(OpEqualVerify, -2)?;
 
     // The state region starts `template_prefix_len` bytes into the redeem script.
-    emit_state_framing_guard(input_idx, template_prefix_len, layout_field_types, &bytecode_size_expr, &env, &mut emitter)?;
+    emit_state_framing_guard(input_idx, template_prefix_len, layout_field_types, sigscript_base_expr, &env, &mut emitter)?;
 
     Ok(())
 }

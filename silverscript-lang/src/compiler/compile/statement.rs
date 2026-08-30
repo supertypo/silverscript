@@ -599,12 +599,21 @@ fn compile_read_input_state_statement<'i>(
             let state_start_offset = checked_sub(state_end, total_state_len)?;
 
             let input_idx = args[0].clone();
+            // Derive the window's base before anything measures from it. Both checks below and
+            // every field read start there, and deriving it is pure arithmetic over an
+            // introspection: nothing is read through it until the binding's own substring, which
+            // still precedes the guard, which still precedes every field read.
+            let base_name = bind_input_sigscript_base(ctx, &input_idx, Expr::int(bytecode_size_value))?;
+            added_stack_locals.push(base_name.clone());
+            let base_expr = Expr::identifier(&base_name);
+
             // Fix WHERE the reads are measured from before pinning what they land on: the guard
             // below pins each field's header at a constant offset, and those offsets are only
             // meaningful once the window itself cannot move.
             compile_input_script_binding(
                 &input_idx,
                 &Expr::int(bytecode_size_value),
+                &base_expr,
                 ctx.stack_bindings,
                 ctx.types,
                 ctx.builder,
@@ -617,15 +626,13 @@ fn compile_read_input_state_statement<'i>(
                 &input_idx,
                 &Expr::int(state_start_offset as i64),
                 &layout_field_types,
-                &Expr::int(bytecode_size_value),
+                &base_expr,
                 ctx.stack_bindings,
                 ctx.types,
                 ctx.builder,
                 ctx.bytecode_size,
                 ctx.contract_constants,
             )?;
-            let base_name = bind_input_sigscript_base(ctx, &input_idx, Expr::int(bytecode_size_value))?;
-            added_stack_locals.push(base_name.clone());
 
             let mut field_chunk_offset = 0usize;
             for field in contract_fields {
@@ -685,16 +692,6 @@ fn compile_read_input_state_statement<'i>(
                 &TypeRef { base: TypeBase::Custom(target_struct.to_string()), array_dims: Vec::new() },
                 structs,
             )?;
-            compile_read_input_state_with_template_validation(
-                args,
-                ctx.stack_bindings,
-                ctx.types,
-                ctx.builder,
-                &layout_field_types,
-                ctx.bytecode_size,
-                ctx.contract_constants,
-            )?;
-
             let input_idx = input_idx.clone();
             let state_start_offset_expr = template_prefix_len.clone();
             let bytecode_size_expr = templated_input_bytecode_size_expr(
@@ -703,8 +700,25 @@ fn compile_read_input_state_statement<'i>(
                 &layout_field_types,
                 ctx.contract_constants,
             )?;
+            // As in the plain arm, the base is derived before the validation that measures from
+            // it. Here it is worth more: the size is built from the claimed prefix and suffix
+            // lengths, so each redundant derivation is two stack picks and two additions rather
+            // than one constant push.
             let base_name = bind_input_sigscript_base(ctx, &input_idx, bytecode_size_expr.clone())?;
             added_stack_locals.push(base_name.clone());
+            let base_expr = Expr::identifier(&base_name);
+
+            compile_read_input_state_with_template_validation(
+                args,
+                ctx.stack_bindings,
+                ctx.types,
+                ctx.builder,
+                &layout_field_types,
+                &bytecode_size_expr,
+                &base_expr,
+                ctx.bytecode_size,
+                ctx.contract_constants,
+            )?;
 
             let mut field_chunk_offset = 0usize;
 
