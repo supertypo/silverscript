@@ -328,6 +328,24 @@ fn templated_read_rejects_length_changing_reframe() {
     assert!(result.is_err(), "a length-changing reframe must be refused");
 }
 
+/// The templated decoder measures its window from `sigscript_len(idx)` minus the size it derives
+/// from the claimed prefix and suffix lengths, so a foreign script longer than that size slides
+/// the window forward exactly as it does for the plain decoder. What refuses it here is the
+/// template hash and the P2SH commitment over the reconstructed redeem script, not the framing
+/// guard.
+///
+/// This is also the precondition behind treating the window's end as the sigscript length: that
+/// identity holds because the base is the length minus the size, and it is only *safe* because a
+/// script of some other length cannot get this far.
+#[test]
+fn templated_read_rejects_a_longer_foreign_script() {
+    let region = window_sliding_region();
+    assert_eq!(region.len(), honest_state_region().len() + 1, "one byte longer, which is what slides the window");
+
+    let result = run_templated_reader(&region, (SLID_FLAG, [SLID_KEY_BYTE; 32]));
+    assert!(result.is_err(), "a foreign script longer than the committed template must not be decoded: {result:?}");
+}
+
 // ---------------------------------------------------------------------------
 // readInputState
 // ---------------------------------------------------------------------------
