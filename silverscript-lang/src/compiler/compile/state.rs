@@ -9,8 +9,18 @@ fn byte_array_type(dimension: ArrayDim) -> TypeRef {
     TypeRef { base: TypeBase::Byte, array_dims: vec![dimension] }
 }
 
+fn input_sigscript_len_expr<'i>(input_idx: &Expr<'i>) -> Expr<'i> {
+    Expr::call("OpTxInputScriptSigLen", vec![input_idx.clone()])
+}
+
+/// The offset the script being read starts at: the sigscript's length minus that script's size.
+///
+/// Defined that way, the script's end is the sigscript's length again, which is why a caller that
+/// wants the end takes it from the length directly rather than adding the size back on. A base
+/// meaning anything else would move the end without moving the start, and nothing about the read
+/// would look wrong.
 pub(super) fn input_sigscript_base_expr<'i>(input_idx: &Expr<'i>, bytecode_size_expr: Expr<'i>) -> Expr<'i> {
-    binary_expr(BinaryOp::Sub, Expr::call("OpTxInputScriptSigLen", vec![input_idx.clone()]), bytecode_size_expr)
+    binary_expr(BinaryOp::Sub, input_sigscript_len_expr(input_idx), bytecode_size_expr)
 }
 
 fn input_sigscript_substr_expr<'i>(input_idx: &Expr<'i>, start: Expr<'i>, end: Expr<'i>) -> Expr<'i> {
@@ -155,7 +165,8 @@ pub(super) fn cast_read_input_state_expr<'i>(substr: Expr<'i>, type_ref: &TypeRe
 ///   args = (input_idx, template_prefix_len, template_suffix_len, expected_template_hash)
 ///   require target state layout is a non-empty flattened struct
 ///
-///   bytecode_size, bytecode_base = the caller's, derived once for the whole read
+///   bytecode_base = the caller's, derived once for the whole read
+///   bytecode_end  = input_sigscript_len(input_idx)
 ///
 ///   actual_redeem_script = input_sigscript[bytecode_base .. bytecode_base + bytecode_size]
 ///   prefix = input_sigscript[bytecode_base .. bytecode_base + template_prefix_len]
@@ -180,7 +191,6 @@ pub(super) fn compile_read_input_state_with_template_validation(
     types: &TypeMap,
     builder: &mut ScriptBuilder,
     layout_field_types: &[TypeRef],
-    bytecode_size_expr: &Expr<'_>,
     sigscript_base_expr: &Expr<'_>,
     current_bytecode_size: Option<i64>,
     contract_constants: &HashMap<String, Expr<'_>>,
@@ -198,7 +208,8 @@ pub(super) fn compile_read_input_state_with_template_validation(
 
     let bytecode_base_expr = sigscript_base_expr.clone();
     let prefix_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), template_prefix_len.clone());
-    let bytecode_end_expr = binary_expr(BinaryOp::Add, bytecode_base_expr.clone(), bytecode_size_expr.clone());
+    // The base is the sigscript's length minus the size, so the end is the length again.
+    let bytecode_end_expr = input_sigscript_len_expr(input_idx);
     let state_len = encoded_state_len_for_layout_field_types(layout_field_types, contract_constants)?;
     let suffix_start_expr = binary_expr(BinaryOp::Add, prefix_end_expr.clone(), Expr::int(state_len as i64));
     let suffix_end_expr = binary_expr(BinaryOp::Add, suffix_start_expr.clone(), template_suffix_len.clone());

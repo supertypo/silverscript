@@ -682,7 +682,6 @@ fn compile_read_input_state_statement<'i>(
                 ctx.types,
                 ctx.builder,
                 &layout_field_types,
-                &bytecode_size_expr,
                 &base_expr,
                 ctx.bytecode_size,
                 ctx.contract_constants,

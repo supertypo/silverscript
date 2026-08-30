@@ -8774,11 +8774,15 @@ fn read_input_state_introspects_the_sigscript_length_once_per_call_site() {
 }
 
 #[test]
-fn read_input_state_with_template_introspects_the_sigscript_length_once_per_call_site() {
+fn read_input_state_with_template_introspects_the_sigscript_length_twice_per_call_site() {
     // The templated decoder derives the same base, but from the claimed prefix and suffix lengths
     // rather than a constant, so each redundant derivation costs a good deal more than the plain
     // decoder's. It is measured from in three places by the validation (the redeem script, the
     // prefix and the suffix) and once per field by the reads.
+    //
+    // Twice rather than once because the window's end is the length itself: taking it directly
+    // costs one introspection in place of the base, a push of the size and an addition, and the
+    // size here is two more picks and two more additions again.
     let source = r#"
         contract Reader() {
             struct RemoteState {
@@ -8800,7 +8804,11 @@ fn read_input_state_with_template_introspects_the_sigscript_length_once_per_call
     let compiled = compile_contract(source, &[], CompileOptions::default()).expect("compile succeeds");
     let derivations = opcode_occurrences(&bytecode(&compiled), OpTxInputScriptSigLen);
 
-    assert_eq!(derivations, 1, "a templated state read should introspect the sigscript length once, got {derivations}");
+    assert_eq!(
+        derivations, 2,
+        "a templated state read should introspect the sigscript length twice, once for the base \
+         and once for the window's end, got {derivations}"
+    );
 }
 
 fn wide_mixed_width_state_source() -> String {
