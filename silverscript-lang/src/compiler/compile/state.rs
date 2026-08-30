@@ -108,12 +108,12 @@ pub(super) fn templated_input_bytecode_size_expr<'i>(
 
 /// One field's read, at its constant offset from `sigscript_base_expr`.
 ///
-/// The base — `input_sigscript_len(idx) - bytecode_size` — is a parameter rather than something
-/// this builds, because it is the same value for every field of a call site and it is not
-/// constant-foldable: the sigscript length is an introspection. Callers that read a whole state
-/// therefore compute it ONCE into a stack local and pass a reference to it here, so a read costs
-/// one stack pick instead of a fresh introspection, subtraction and constant push. `start` and
-/// `end` each reference it, so an inlined base would be emitted twice per field.
+/// The base, `input_sigscript_len(idx) - bytecode_size`, is a parameter rather than something this
+/// builds. It is the same value for every field of a call site and it is not constant-foldable,
+/// because the sigscript length is an introspection. A caller that reads a whole state therefore
+/// derives it once into a stack local and passes a reference to it here, so a field read costs one
+/// stack pick instead of a fresh introspection, subtraction and constant push. `start` and `end`
+/// each reference it, so an inlined base would be emitted twice per field.
 pub(super) fn read_input_state_field_expr<'i>(
     input_idx: &Expr<'i>,
     field_type: &TypeRef,
