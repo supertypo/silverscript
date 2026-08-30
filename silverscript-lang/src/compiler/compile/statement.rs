@@ -533,6 +533,34 @@ fn compile_console_statement() -> Result<Vec<String>, CompilerError> {
     Ok(Vec::new())
 }
 
+/// Binds the sigscript base that every field of one state read shares, and returns its name.
+///
+/// See [`read_input_state_field_expr`] for why the base is derived once per call site rather than
+/// per field. The caller adds the returned name to its `added_stack_locals`, so the enclosing
+/// block drops the base with the field bindings.
+///
+/// A source identifier cannot collide with it, because the grammar requires identifiers to begin
+/// with an ASCII letter. A second base of the same call site cannot either, because a state has at
+/// least one field and so the stack is deeper by the time the next one is bound; the loop only
+/// keeps that from being load-bearing.
+fn bind_input_sigscript_base<'i>(
+    ctx: &mut CompileStatementContext<'_, 'i>,
+    input_idx: &Expr<'i>,
+    bytecode_size_expr: Expr<'i>,
+) -> Result<String, CompilerError> {
+    let mut index = ctx.stack_bindings.len();
+    let name = loop {
+        let name = format!("__input_state_base_{index}");
+        if !ctx.stack_bindings.contains(&name) {
+            break name;
+        }
+        index += 1;
+    };
+    let base = input_sigscript_base_expr(input_idx, bytecode_size_expr);
+    compile_stack_variable_definition(ctx, &name, TypeRef { base: TypeBase::Int, array_dims: Vec::new() }, base)?;
+    Ok(name)
+}
+
 fn compile_read_input_state_statement<'i>(
     ctx: &mut CompileStatementContext<'_, 'i>,
     target_struct: &str,
@@ -596,6 +624,8 @@ fn compile_read_input_state_statement<'i>(
                 ctx.bytecode_size,
                 ctx.contract_constants,
             )?;
+            let base_name = bind_input_sigscript_base(ctx, &input_idx, Expr::int(bytecode_size_value))?;
+            added_stack_locals.push(base_name.clone());
 
             let mut field_chunk_offset = 0usize;
             for field in contract_fields {
@@ -616,7 +646,7 @@ fn compile_read_input_state_statement<'i>(
                     &field.type_ref,
                     Expr::int(state_start_offset as i64),
                     field_chunk_offset,
-                    Expr::int(bytecode_size_value),
+                    Expr::identifier(&base_name),
                     ctx.contract_constants,
                     "readInputState",
                 )?;
@@ -673,6 +703,9 @@ fn compile_read_input_state_statement<'i>(
                 &layout_field_types,
                 ctx.contract_constants,
             )?;
+            let base_name = bind_input_sigscript_base(ctx, &input_idx, bytecode_size_expr.clone())?;
+            added_stack_locals.push(base_name.clone());
+
             let mut field_chunk_offset = 0usize;
 
             for field in &struct_spec.fields {
@@ -691,7 +724,7 @@ fn compile_read_input_state_statement<'i>(
                     &field.type_ref,
                     state_start_offset_expr.clone(),
                     field_chunk_offset,
-                    bytecode_size_expr.clone(),
+                    Expr::identifier(&base_name),
                     ctx.contract_constants,
                     "readInputStateWithTemplate",
                 )?;

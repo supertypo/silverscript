@@ -203,6 +203,15 @@ fn sigscript_push_bytecode(bytecode: &[u8]) -> Vec<u8> {
     script_builder().add_data_with_push_opcode(bytecode).unwrap().drain()
 }
 
+fn opcode_occurrences(bytecode: &[u8], opcode_value: u8) -> usize {
+    // Parsed rather than scanned for the byte, so a data push that happens to contain the value
+    // is not miscounted.
+    parse_script::<PopulatedTransaction<'static>, SigHashReusedValuesUnsync>(bytecode)
+        .map(|opcode| opcode.expect("compiled bytecode should parse"))
+        .filter(|opcode| opcode.value() == opcode_value)
+        .count()
+}
+
 fn test_input(index: u32, signature_script: Vec<u8>) -> TransactionInput {
     TransactionInput::new(
         TransactionOutpoint { transaction_id: TransactionId::from_bytes([index as u8; 32]), index },
@@ -8680,6 +8689,225 @@ fn read_input_state_accepts_three_field_state_under_dispatch_tag_dispatch() {
 }
 
 #[test]
+fn read_input_state_derives_the_sigscript_base_once_regardless_of_field_count() {
+    // The base is the input's sigscript length minus this.bytecodeSize. It is the same value for
+    // every field, it cannot be constant-folded because the length is an introspection, and each
+    // field read references it twice, once for the substring's start and once for its end. Built
+    // inline it is therefore emitted twice per field, so the cost of reading a state grows with
+    // its width for no reason. Counting the introspection states that directly: it must not
+    // scale with the number of fields.
+    let contract = |fields: &str, binds: &str| {
+        format!(
+            r#"
+        contract C(byte[32] initA, byte[32] initB, byte[32] initC, byte[32] initD) {{
+            {fields}
+
+            entry main() {{
+                State s = readInputState(this.activeInputIndex);
+                {binds}
+            }}
+        }}
+    "#
+        )
+    };
+    let arg = || vec![7u8; 32].into();
+
+    let one = contract("byte[32] a = initA;", "require(s.a == initA);");
+    let four = contract(
+        r#"byte[32] a = initA;
+            byte[32] b = initB;
+            byte[32] c = initC;
+            byte[32] d = initD;"#,
+        r#"require(s.a == initA);
+                require(s.b == initB);
+                require(s.c == initC);
+                require(s.d == initD);"#,
+    );
+
+    let compiled_one = compile_contract(&one, &[arg(), arg(), arg(), arg()], CompileOptions::default()).expect("one field compiles");
+    let compiled_four =
+        compile_contract(&four, &[arg(), arg(), arg(), arg()], CompileOptions::default()).expect("four fields compile");
+
+    let one_derivations = opcode_occurrences(&bytecode(&compiled_one), OpTxInputScriptSigLen);
+    let four_derivations = opcode_occurrences(&bytecode(&compiled_four), OpTxInputScriptSigLen);
+
+    // The claim is that the count is a property of the call site, not of the state's width, so it
+    // is asserted as an invariance rather than as an absolute. Anything else the compiler may
+    // introspect the sigscript length for costs the same for one field as for four, and pinning a
+    // literal here would make this test a tripwire for those instead of for this.
+    assert!(one_derivations > 0, "reading a foreign state must derive its sigscript base at all");
+    assert_eq!(
+        four_derivations, one_derivations,
+        "the sigscript base is per call site, so four fields must derive it as often as one \
+         (got {four_derivations} for four fields against {one_derivations} for one)"
+    );
+}
+
+fn wide_mixed_width_state_source() -> String {
+    let c = (0..100u8).map(|byte| format!("{:02x}", byte ^ 0xa5)).collect::<String>();
+    let d = (0..32u8).map(|byte| format!("{:02x}", byte.wrapping_add(0x40))).collect::<String>();
+    format!(
+        r#"
+        contract C(int initA, byte[2] initB, byte[100] initC, byte[32] initD, byte[7] initE) {{
+            int a = initA;
+            byte[2] b = initB;
+            byte[100] c = initC;
+            byte[32] d = initD;
+            byte[7] e = initE;
+
+            entry noop() {{
+                require(true);
+            }}
+
+            entry main() {{
+                State s = readInputState(this.activeInputIndex);
+                require(s.a == 5);
+                require(s.b == byte[_](0x3412));
+                require(s.c == byte[100](0x{c}));
+                require(s.d == byte[32](0x{d}));
+                require(s.e == byte[_](0x01020304050607));
+            }}
+        }}
+    "#
+    )
+}
+
+fn wide_mixed_width_state_args() -> Vec<ArtifactValue> {
+    vec![
+        5.into(),
+        vec![0x34u8, 0x12u8].into(),
+        (0..100u8).map(|byte| byte ^ 0xa5).collect::<Vec<_>>().into(),
+        (0..32u8).map(|byte| byte.wrapping_add(0x40)).collect::<Vec<_>>().into(),
+        vec![1u8, 2, 3, 4, 5, 6, 7].into(),
+    ]
+}
+
+fn run_self_reading_state_case(
+    source: &str,
+    args: &[ArtifactValue],
+    entry_args: &[ArtifactValue],
+) -> Result<(), kaspa_txscript_errors::TxScriptError> {
+    let compiled = compile_contract(source, args, CompileOptions::default()).expect("compile succeeds");
+    let sigscript = encode_entry_sig_script(&compiled, "main", entry_args).expect("sigscript builds");
+    let sigscript = pay_to_script_hash_signature_script(bytecode(&compiled).clone(), sigscript).expect("p2sh sigscript wraps");
+    let input_spk = pay_to_script_hash_script(&bytecode(&compiled));
+    let output = TransactionOutput { value: 1000, script_public_key: input_spk.clone(), covenant: None };
+    let tx = Transaction::new(1, vec![test_input(0, sigscript)], vec![output.clone()], 0, Default::default(), 0, vec![]);
+    let utxo_entry = UtxoEntry::new(output.value, input_spk, 0, tx.is_coinbase(), None);
+
+    execute_input(tx, vec![utxo_entry], 0)
+}
+
+#[test]
+fn read_input_state_runtime_decodes_every_field_of_a_wide_mixed_width_state() {
+    // Every field is read at a constant offset from one sigscript base the whole call site
+    // shares, and nothing in a field's own read reveals that base. A base taken from the wrong
+    // stack slot, or an offset that drifts with a field's position, moves the read onto
+    // neighbouring bytes and still yields a well-formed value, so only the decoded values show
+    // it. The widths are deliberately uneven, and one field is wide enough to need a two-byte
+    // push header, so no two fields start at the same offset and a misread cannot match by
+    // accident.
+    let result = run_self_reading_state_case(&wide_mixed_width_state_source(), &wide_mixed_width_state_args(), &[]);
+    assert!(result.is_ok(), "every field of a wide mixed-width state should decode: {result:?}");
+}
+
+#[test]
+fn read_input_state_runtime_rejects_a_wrong_expectation_for_a_wide_mixed_width_state() {
+    // Without this the test above would still pass if every field decoded to the wrong value in
+    // the same way, so it is what makes that test an observation rather than an assumption.
+    let source = wide_mixed_width_state_source().replace("require(s.a == 5);", "require(s.a == 6);");
+    let result = run_self_reading_state_case(&source, &wide_mixed_width_state_args(), &[]);
+    assert!(result.is_err(), "a wrong expectation must be rejected, otherwise the decode is not being observed");
+}
+
+#[test]
+fn read_input_state_runtime_decodes_two_states_bound_in_one_scope() {
+    // Two reads in one scope keep two bases live at once, at different stack depths.
+    let source = r#"
+        contract C(int initA, byte[2] initB) {
+            int a = initA;
+            byte[2] b = initB;
+
+            entry noop() {
+                require(true);
+            }
+
+            entry main() {
+                State {a: int firstA, b: byte[2] firstB} = readInputState(this.activeInputIndex);
+                State {a: int secondA, b: byte[2] secondB} = readInputState(this.activeInputIndex);
+                require(firstA == 5);
+                require(secondA == 5);
+                require(firstB == byte[_](0x3412));
+                require(secondB == byte[_](0x3412));
+            }
+        }
+    "#;
+
+    let args = [5.into(), vec![0x34u8, 0x12u8].into()];
+    let result = run_self_reading_state_case(source, &args, &[]);
+    assert!(result.is_ok(), "two states bound in one scope should both decode: {result:?}");
+}
+
+#[test]
+fn read_input_state_runtime_decodes_states_read_in_sibling_blocks() {
+    // Sibling blocks drop their bindings before the next block opens, so both reads bind their
+    // base at the same stack depth.
+    let source = r#"
+        contract C(int initA, byte[2] initB) {
+            int a = initA;
+            byte[2] b = initB;
+
+            entry noop() {
+                require(true);
+            }
+
+            entry main() {
+                {
+                    State {a: int firstA, b: byte[2] firstB} = readInputState(this.activeInputIndex);
+                    require(firstA == 5);
+                    require(firstB == byte[_](0x3412));
+                }
+                {
+                    State {a: int secondA, b: byte[2] secondB} = readInputState(this.activeInputIndex);
+                    require(secondA == 5);
+                    require(secondB == byte[_](0x3412));
+                }
+            }
+        }
+    "#;
+
+    let args = [5.into(), vec![0x34u8, 0x12u8].into()];
+    let result = run_self_reading_state_case(source, &args, &[]);
+    assert!(result.is_ok(), "sibling blocks should each decode their own state: {result:?}");
+}
+
+#[test]
+fn read_input_state_runtime_decodes_with_an_input_index_from_a_stack_local() {
+    // An input index held in a stack local is re-resolved for every field, at a depth that moves
+    // as the field bindings accumulate.
+    let source = r#"
+        contract C(int initA, byte[2] initB) {
+            int a = initA;
+            byte[2] b = initB;
+
+            entry noop() {
+                require(true);
+            }
+
+            entry main(int inputIdx) {
+                State {a: int readA, b: byte[2] readB} = readInputState(inputIdx);
+                require(readA == 5);
+                require(readB == byte[_](0x3412));
+            }
+        }
+    "#;
+
+    let args = [5.into(), vec![0x34u8, 0x12u8].into()];
+    let result = run_self_reading_state_case(source, &args, &[0.into()]);
+    assert!(result.is_ok(), "an input index read from a stack local should decode: {result:?}");
+}
+
+#[test]
 fn read_input_state_accepts_pubkey_and_bool_fields_under_dispatch_tag_dispatch() {
     let source = r#"
         contract C(bool initFlag, pubkey initOwner) {
@@ -9840,6 +10068,66 @@ fn runs_read_input_state_with_template_destructuring() {
 
     let result = run_read_input_state_with_template_case(&reader_source, &[], &target_input_compiled);
     assert!(result.is_ok(), "readInputStateWithTemplate destructuring should succeed: {}", result.unwrap_err());
+}
+
+#[test]
+fn read_input_state_with_template_runtime_decodes_with_lengths_from_stack_locals() {
+    // The templated decoder's sigscript base is the input's sigscript length minus a size built
+    // from the prefix and suffix lengths. Every other executing test passes those as literals,
+    // which the compiler folds; passed as entry arguments they are stack locals instead, so the
+    // base is built from picks whose depth moves as the field bindings accumulate.
+    let target_source = r#"
+        contract A(byte[2] initY, int initX) {
+            byte[2] y = initY;
+            int x = initX;
+
+            entry noop() {
+                require(true);
+            }
+        }
+    "#;
+    let target_input_compiled = compile_contract(target_source, &[vec![0x78u8, 0x56u8].into(), 11.into()], CompileOptions::default())
+        .expect("compile target succeeds");
+    let (template_prefix, template_suffix, template_hash) = compiled_template_parts_and_hash(&target_input_compiled);
+
+    let reader_source = format!(
+        r#"
+        contract Reader() {{
+            struct RemoteState {{
+                byte[2] y;
+                int x;
+            }}
+
+            entry main(int prefixLen, int suffixLen) {{
+                RemoteState {{y: byte[2] inY, x: int inX}} = readInputStateWithTemplate(
+                    1,
+                    prefixLen,
+                    suffixLen,
+                    byte[32](0x{})
+                );
+                require(inY == byte[_](0x7856));
+                require(inX == 11);
+            }}
+        }}
+    "#,
+        template_hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+    );
+
+    let reader_compiled = compile_contract(&reader_source, &[], CompileOptions::default()).expect("compile reader succeeds");
+    let entry_args = [(template_prefix.len() as i64).into(), (template_suffix.len() as i64).into()];
+    let input0 = test_input(0, encode_entry_sig_script(&reader_compiled, "main", &entry_args).expect("sigscript builds"));
+    let input1 = test_input(1, sigscript_push_bytecode(&bytecode(&target_input_compiled)));
+    let output = TransactionOutput {
+        value: 1000,
+        script_public_key: ScriptPublicKey::new(0, bytecode(&reader_compiled).clone().into()),
+        covenant: None,
+    };
+    let tx = Transaction::new(1, vec![input0, input1], vec![output.clone()], 0, Default::default(), 0, vec![]);
+    let utxo0 = UtxoEntry::new(output.value, output.script_public_key.clone(), 0, tx.is_coinbase(), None);
+    let utxo1 = UtxoEntry::new(1000, pay_to_script_hash_script(&bytecode(&target_input_compiled)), 0, tx.is_coinbase(), None);
+
+    let result = execute_input(tx, vec![utxo0, utxo1], 0);
+    assert!(result.is_ok(), "prefix and suffix lengths from stack locals should decode: {}", result.unwrap_err());
 }
 
 #[test]

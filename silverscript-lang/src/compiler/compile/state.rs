@@ -9,7 +9,7 @@ fn byte_array_type(dimension: ArrayDim) -> TypeRef {
     TypeRef { base: TypeBase::Byte, array_dims: vec![dimension] }
 }
 
-fn input_sigscript_base_expr<'i>(input_idx: &Expr<'i>, bytecode_size_expr: Expr<'i>) -> Expr<'i> {
+pub(super) fn input_sigscript_base_expr<'i>(input_idx: &Expr<'i>, bytecode_size_expr: Expr<'i>) -> Expr<'i> {
     binary_expr(BinaryOp::Sub, Expr::call("OpTxInputScriptSigLen", vec![input_idx.clone()]), bytecode_size_expr)
 }
 
@@ -43,7 +43,7 @@ pub(in crate::compiler) fn read_input_state_field_expr_symbolic<'i>(
         &field.type_ref,
         Expr::int(state_start_offset as i64),
         field_chunk_offset,
-        bytecode_size_expr,
+        input_sigscript_base_expr(input_idx, bytecode_size_expr),
         contract_constants,
         "readInputState",
     )
@@ -232,12 +232,20 @@ pub(super) fn compile_state_framing_guard(
     emit_state_framing_guard(input_idx, state_start_offset_expr, layout_field_types, bytecode_size_expr, &env, &mut emitter)
 }
 
+/// One field's read, at its constant offset from `sigscript_base_expr`.
+///
+/// The base, `input_sigscript_len(idx) - bytecode_size`, is a parameter rather than something this
+/// builds. It is the same value for every field of a call site and it is not constant-foldable,
+/// because the sigscript length is an introspection. A caller that reads a whole state therefore
+/// derives it once into a stack local and passes a reference to it here, so a field read costs one
+/// stack pick instead of a fresh introspection, subtraction and constant push. `start` and `end`
+/// each reference it, so an inlined base would be emitted twice per field.
 pub(super) fn read_input_state_field_expr<'i>(
     input_idx: &Expr<'i>,
     field_type: &TypeRef,
     state_start_offset_expr: Expr<'i>,
     field_chunk_offset: usize,
-    bytecode_size_expr: Expr<'i>,
+    sigscript_base_expr: Expr<'i>,
     contract_constants: &HashMap<String, Expr<'i>>,
     builtin_name: &str,
 ) -> Result<Expr<'i>, CompilerError> {
@@ -248,7 +256,7 @@ pub(super) fn read_input_state_field_expr<'i>(
     let field_prefix_len = data_prefix(field_payload_len)?.len();
     let field_data_offset = checked_add(field_chunk_offset, field_prefix_len)?;
     let field_payload_offset = binary_expr(BinaryOp::Add, state_start_offset_expr, Expr::int(field_data_offset as i64));
-    let start = binary_expr(BinaryOp::Add, input_sigscript_base_expr(input_idx, bytecode_size_expr), field_payload_offset);
+    let start = binary_expr(BinaryOp::Add, sigscript_base_expr, field_payload_offset);
     let end = binary_expr(BinaryOp::Add, start.clone(), Expr::int(field_payload_len as i64));
     let substr = input_sigscript_substr_expr(input_idx, start, end);
 
