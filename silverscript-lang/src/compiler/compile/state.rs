@@ -168,12 +168,12 @@ pub(super) fn cast_read_input_state_expr<'i>(substr: Expr<'i>, type_ref: &TypeRe
 ///   bytecode_base = the caller's, derived once for the whole read
 ///   bytecode_end  = input_sigscript_len(input_idx)
 ///
-///   actual_redeem_script = input_sigscript[bytecode_base .. bytecode_base + bytecode_size]
+///   actual_redeem_script = input_sigscript[bytecode_base .. bytecode_end]
 ///   prefix = input_sigscript[bytecode_base .. bytecode_base + template_prefix_len]
 ///   suffix = input_sigscript[
 ///       bytecode_base + template_prefix_len + encoded_state_len(layout_field_types)
 ///       ..
-///       bytecode_base + bytecode_size
+///       bytecode_base + template_prefix_len + encoded_state_len(layout_field_types) + template_suffix_len
 ///   ]
 ///
 ///   actual_template = i64le(prefix.length) || prefix || i64le(suffix.length) || suffix
